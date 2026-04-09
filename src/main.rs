@@ -140,7 +140,7 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     for item in sorted_struct_enums.into_iter() {
         let snippet = item_snippet(&item, &src, &line_starts);
-        buckets[4].push(snippet);
+        buckets[7].push(snippet);
     }
 
     let mut out = String::new();
@@ -161,7 +161,9 @@ fn reorder_file(path: &Path) -> Result<()> {
             continue;
         }
 
-        bucket.sort();
+        if idx != 7 {
+            bucket.sort();
+        }
 
         if wrote_any && idx != 0 {
             while !out.ends_with("\n\n") {
@@ -418,46 +420,20 @@ fn sort_by_usage(items: Vec<Item>, src: &str, _line_starts: &[usize]) -> Vec<Ite
 
     let refs = find_references(&names, src);
 
-    let mut referenced: HashSet<String> = HashSet::new();
+    let mut outgoing_counts: HashMap<String, usize> = HashMap::new();
     for name in &names {
-        if let Some(sty) = refs.get(name) {
-            for r in sty {
-                if name_to_item.contains_key(r) {
-                    referenced.insert(r.clone());
-                }
-            }
-        }
+        outgoing_counts.insert(name.clone(), refs.get(name).map(|v| v.len()).unwrap_or(0));
     }
+
+    let mut name_count: Vec<(String, usize)> = names
+        .iter()
+        .map(|n| (n.clone(), *outgoing_counts.get(n).unwrap_or(&0)))
+        .collect();
+
+    name_count.sort_by(|a, b| b.1.cmp(&a.1));
 
     let mut sorted: Vec<Item> = Vec::new();
-    let mut remaining: HashSet<String> = names.iter().cloned().collect();
-
-    let mut changed = true;
-    while !remaining.is_empty() && changed {
-        changed = false;
-        let mut to_remove: Vec<String> = Vec::new();
-        for name in &remaining {
-            let is_referenced = names.iter().any(|n| {
-                if let Some(r) = refs.get(n) {
-                    r.contains(name)
-                } else {
-                    false
-                }
-            });
-            if !is_referenced {
-                if let Some(item) = name_to_item.get(name) {
-                    sorted.push(item.clone());
-                }
-                to_remove.push(name.clone());
-                changed = true;
-            }
-        }
-        for n in to_remove {
-            remaining.remove(&n);
-        }
-    }
-
-    for name in remaining {
+    for (name, _) in name_count {
         if let Some(item) = name_to_item.get(&name) {
             sorted.push(item.clone());
         }
