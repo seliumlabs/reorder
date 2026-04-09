@@ -131,7 +131,7 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     let sorted_struct_enums = sort_by_usage(struct_enum_items, &src, &line_starts);
 
-    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 10];
+    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 11];
     for item in other_items.into_iter() {
         let cat = category(&item);
         let snippet = item_snippet(&item, &src, &line_starts);
@@ -232,7 +232,8 @@ fn category(item: &Item) -> Cat {
         Item::Type(_) => 4,
         Item::Const(_) | Item::Static(_) => 5,
         Item::Trait(_) | Item::TraitAlias(_) => 6,
-        Item::Struct(_) | Item::Enum(_) | Item::Union(_) | Item::Mod(_) => 7,
+        Item::Struct(_) | Item::Enum(_) | Item::Union(_) => 7,
+        Item::Mod(_) => 10,
         Item::Impl(_) => 8,
         Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 9,
         _ => 9,
@@ -275,6 +276,8 @@ fn is_std_crate(name: &str) -> bool {
 fn blank_lines_after(category: usize) -> usize {
     match category {
         0..=4 => 0,
+        7 => 1,
+        10 => 0,
         _ => 1,
     }
 }
@@ -584,6 +587,7 @@ mod tests {
         assert_eq!(blank_lines_after(7), 1);
         assert_eq!(blank_lines_after(8), 1);
         assert_eq!(blank_lines_after(9), 1);
+        assert_eq!(blank_lines_after(10), 0);
     }
 
     #[test]

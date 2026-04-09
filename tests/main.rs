@@ -159,3 +159,33 @@ use crate::module::Blah;
 "
     );
 }
+
+#[test]
+fn test_modules_no_blank_lines_between() {
+    let path = test_dir().join("modules.rs");
+    fs::write(
+        &path,
+        "\
+pub mod context;
+
+pub mod ids;
+
+pub mod journal;
+
+pub mod run;
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    assert_eq!(
+        result,
+        "\
+pub mod context;
+pub mod ids;
+pub mod journal;
+pub mod run;
+"
+    );
+}
