@@ -189,3 +189,84 @@ pub mod run;
 "
     );
 }
+
+#[test]
+fn test_impl_order_by_type_order() {
+    let path = test_dir().join("impl_order.rs");
+    fs::write(
+        &path,
+        "\
+pub struct ArtifactId(pub String);
+
+pub struct TransitionId(pub String);
+
+pub struct ArtifactRef {
+    data: i32,
+}
+
+impl ArtifactId {
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+}
+
+impl ArtifactRef {
+    pub fn downcast_ref(&self) -> i32 {
+        self.data
+    }
+}
+
+impl Default for ArtifactId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransitionId {
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+}
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    assert_eq!(
+        result,
+        "\
+pub struct ArtifactId(pub String);
+
+pub struct TransitionId(pub String);
+
+pub struct ArtifactRef {
+    data: i32,
+}
+
+impl ArtifactId {
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+}
+
+impl Default for ArtifactId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransitionId {
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+}
+
+impl ArtifactRef {
+    pub fn downcast_ref(&self) -> i32 {
+        self.data
+    }
+}
+"
+    );
+}

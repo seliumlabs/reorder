@@ -131,6 +131,11 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     let sorted_struct_enums = sort_by_usage(struct_enum_items, &src, &line_starts);
 
+    let type_order: Vec<String> = sorted_struct_enums
+        .iter()
+        .filter_map(|item| item_name(item))
+        .collect();
+
     let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 11];
     for item in other_items.into_iter() {
         let cat = category(&item);
@@ -161,7 +166,20 @@ fn reorder_file(path: &Path) -> Result<()> {
             continue;
         }
 
-        if idx != 7 {
+        if idx == 8 {
+            bucket.sort_by(|a, b| {
+                let name_a = impl_type_name(a);
+                let name_b = impl_type_name(b);
+                let pos_a = type_order.iter().position(|n| n == &name_a);
+                let pos_b = type_order.iter().position(|n| n == &name_b);
+                match (pos_a, pos_b) {
+                    (Some(i), Some(j)) => i.cmp(&j),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Greater,
+                }
+            });
+        } else if idx != 7 {
             bucket.sort();
         }
 
@@ -451,6 +469,23 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Enum(e) => Some(e.ident.to_string()),
         Item::Union(u) => Some(u.ident.to_string()),
         _ => None,
+    }
+}
+
+fn impl_type_name(impl_snippet: &str) -> String {
+    let impl_keyword = "impl";
+    if let Some(start) = impl_snippet.strip_prefix(impl_keyword) {
+        let trimmed = start.trim();
+        if let Some(pos) = trimmed.find('<') {
+            trimmed[..pos].trim().to_string()
+        } else if let Some(for_pos) = trimmed.find(" for ") {
+            let after_for = trimmed[for_pos + 5..].trim();
+            after_for.split_whitespace().next().unwrap_or(after_for).to_string()
+        } else {
+            trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
+        }
+    } else {
+        String::new()
     }
 }
 
