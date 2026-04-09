@@ -7,3 +7,7 @@ edition = "2024"
 anyhow = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", features = ["full"] }
+
+[[test]]
+name = "reorder_tests"
+path = "tests/main.rs"

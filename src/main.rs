@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, bail};
-use std::collections::HashSet;
+use anyhow::{bail, Context, Result};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
@@ -118,11 +118,23 @@ fn reorder_file(path: &Path) -> Result<()> {
     let shebang = file.shebang.take();
     let crate_attrs = std::mem::take(&mut file.attrs);
 
+    let (struct_enum_items, other_items): (Vec<_>, Vec<_>) = file
+        .items
+        .into_iter()
+        .partition(|item| matches!(item, Item::Struct(_) | Item::Enum(_) | Item::Union(_)));
+
+    let sorted_struct_enums = sort_by_usage(struct_enum_items, &src, &line_starts);
+
     let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 8];
-    for item in file.items.into_iter() {
+    for item in other_items.into_iter() {
         let cat = category(&item);
         let snippet = item_snippet(&item, &src, &line_starts);
         buckets[cat].push(snippet);
+    }
+
+    for item in sorted_struct_enums.into_iter() {
+        let snippet = item_snippet(&item, &src, &line_starts);
+        buckets[4].push(snippet);
     }
 
     let mut out = String::new();
@@ -152,11 +164,14 @@ fn reorder_file(path: &Path) -> Result<()> {
 
         let extra_blank = blank_lines_after(idx);
 
-        for item in bucket {
+        let bucket_len = bucket.len();
+        for (i, item) in bucket.into_iter().enumerate() {
             out.push_str(item.trim_end_matches('\n'));
             out.push('\n');
-            for _ in 0..extra_blank {
-                out.push('\n');
+            if i + 1 < bucket_len {
+                for _ in 0..extra_blank {
+                    out.push('\n');
+                }
             }
         }
     }
@@ -164,8 +179,12 @@ fn reorder_file(path: &Path) -> Result<()> {
     while out.ends_with("\n\n\n") {
         out.pop();
     }
-    if !out.ends_with('\n') {
+    let src_has_trailing_newline = src.ends_with('\n');
+    let out_has_trailing_newline = out.ends_with('\n');
+    if src_has_trailing_newline && !out_has_trailing_newline {
         out.push('\n');
+    } else if !src_has_trailing_newline && out_has_trailing_newline {
+        out.pop();
     }
 
     if out != src {
@@ -211,7 +230,7 @@ fn category(item: &Item) -> Cat {
 
 fn blank_lines_after(category: usize) -> usize {
     match category {
-        0 | 2 => 0,
+        0 | 1 | 2 => 0,
         _ => 1,
     }
 }
@@ -314,7 +333,7 @@ fn item_snippet(item: &Item, src: &str, line_starts: &[usize]) -> String {
 
     range.start = range.start.min(range.end);
 
-    src[range].to_string()
+    src[range].trim_end().to_string()
 }
 
 fn item_attributes(item: &Item) -> &[Attribute] {
@@ -336,5 +355,234 @@ fn item_attributes(item: &Item) -> &[Attribute] {
         Item::Use(item) => &item.attrs,
         Item::Verbatim(_) => &[],
         _ => &[],
+    }
+}
+
+fn sort_by_usage(items: Vec<Item>, src: &str, _line_starts: &[usize]) -> Vec<Item> {
+    if items.is_empty() {
+        return items;
+    }
+
+    let mut name_to_item: HashMap<String, Item> = HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+
+    for item in &items {
+        let name = item_name(item);
+        if let Some(n) = name {
+            name_to_item.insert(n.clone(), item.clone());
+            names.push(n);
+        }
+    }
+
+    let refs = find_references(&names, src);
+
+    let mut referenced: HashSet<String> = HashSet::new();
+    for name in &names {
+        if let Some(sty) = refs.get(name) {
+            for r in sty {
+                if name_to_item.contains_key(r) {
+                    referenced.insert(r.clone());
+                }
+            }
+        }
+    }
+
+    let mut sorted: Vec<Item> = Vec::new();
+    let mut remaining: HashSet<String> = names.iter().cloned().collect();
+
+    let mut changed = true;
+    while !remaining.is_empty() && changed {
+        changed = false;
+        let mut to_remove: Vec<String> = Vec::new();
+        for name in &remaining {
+            let is_referenced = names.iter().any(|n| {
+                if let Some(r) = refs.get(n) {
+                    r.contains(name)
+                } else {
+                    false
+                }
+            });
+            if !is_referenced {
+                if let Some(item) = name_to_item.get(name) {
+                    sorted.push(item.clone());
+                }
+                to_remove.push(name.clone());
+                changed = true;
+            }
+        }
+        for n in to_remove {
+            remaining.remove(&n);
+        }
+    }
+
+    for name in remaining {
+        if let Some(item) = name_to_item.get(&name) {
+            sorted.push(item.clone());
+        }
+    }
+
+    sorted
+}
+
+fn item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Struct(s) => Some(s.ident.to_string()),
+        Item::Enum(e) => Some(e.ident.to_string()),
+        Item::Union(u) => Some(u.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn find_references(names: &[String], src: &str) -> HashMap<String, Vec<String>> {
+    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+
+    for name in names {
+        refs.insert(name.clone(), Vec::new());
+    }
+
+    let name_to_range: HashMap<String, (usize, usize)> = names
+        .iter()
+        .filter_map(|n| {
+            let range = find_item_range(n, src)?;
+            Some((n.clone(), range))
+        })
+        .collect();
+
+    let mut i = 0;
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            } else if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &src[start..i];
+
+            if names.iter().any(|n| word == *n) {
+                for (name, range) in &name_to_range {
+                    if start >= range.0 && start <= range.1 && word != name {
+                        if let Some(v) = refs.get_mut(name) {
+                            if !v.contains(&word.to_string()) {
+                                v.push(word.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    refs
+}
+
+fn find_item_range(name: &str, src: &str) -> Option<(usize, usize)> {
+    let pattern = format!("{} {{", name);
+    if let Some(start) = src.find(&pattern) {
+        let mut brace_count = 0;
+        let mut in_body = false;
+        for (i, c) in src[start..].char_indices() {
+            if c == '{' {
+                brace_count += 1;
+                in_body = true;
+            } else if c == '}' {
+                brace_count -= 1;
+                if in_body && brace_count == 0 {
+                    return Some((start, start + i + 1));
+                }
+            }
+        }
+    }
+
+    if let Some(start) = src.find(&format!("{};", name)) {
+        return Some((start, start + name.len() + 1));
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_rust_file() {
+        assert!(is_rust_file(Path::new("foo.rs")));
+        assert!(is_rust_file(Path::new("foo.RS")));
+        assert!(!is_rust_file(Path::new("foo.Rust")));
+        assert!(!is_rust_file(Path::new("foo.txt")));
+        assert!(!is_rust_file(Path::new("foo")));
+        assert!(!is_rust_file(Path::new("foo.rs.txt")));
+    }
+
+    #[test]
+    fn test_line_start_offsets() {
+        let src = "line1\nline2\nline3";
+        let starts = line_start_offsets(src);
+        assert_eq!(starts, vec![0, 6, 12, 17]);
+    }
+
+    #[test]
+    fn test_line_start_offsets_empty() {
+        let src = "";
+        let starts = line_start_offsets(src);
+        assert_eq!(starts, vec![0]);
+    }
+
+    #[test]
+    fn test_line_start_offsets_single_line() {
+        let src = "hello";
+        let starts = line_start_offsets(src);
+        assert_eq!(starts, vec![0, 5]);
+    }
+
+    #[test]
+    fn test_blank_lines_after() {
+        assert_eq!(blank_lines_after(0), 0);
+        assert_eq!(blank_lines_after(1), 0);
+        assert_eq!(blank_lines_after(2), 0);
+        assert_eq!(blank_lines_after(3), 1);
+        assert_eq!(blank_lines_after(4), 1);
+        assert_eq!(blank_lines_after(5), 1);
+        assert_eq!(blank_lines_after(6), 1);
+        assert_eq!(blank_lines_after(7), 1);
+    }
+
+    #[test]
+    fn test_find_item_range_with_braces() {
+        let src = "struct Foo { field: i32 }";
+        let range = find_item_range("Foo", src);
+        assert_eq!(range, Some((7, 25)));
+    }
+
+    #[test]
+    fn test_find_item_range_with_semicolon() {
+        let src = "struct Foo;";
+        let range = find_item_range("Foo", src);
+        assert_eq!(range, Some((7, 11)));
+    }
+
+    #[test]
+    fn test_find_item_range_not_found() {
+        let src = "struct Bar { field: i32 }";
+        let range = find_item_range("Foo", src);
+        assert!(range.is_none());
     }
 }
