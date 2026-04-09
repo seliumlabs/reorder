@@ -1,4 +1,5 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,13 +8,18 @@ use syn::{Attribute, File, Item};
 
 type Cat = usize;
 
-fn main() -> Result<()> {
-    let inputs: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
-    if inputs.is_empty() {
-        bail!("usage: selium_order <files>...");
-    }
+#[derive(Parser)]
+#[command(name = "reorder")]
+#[command(version, about = "Reorder items in Rust source files")]
+struct Args {
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+}
 
-    let files = collect_input_files(inputs)?;
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let files = collect_input_files(args.paths)?;
 
     for path in files {
         reorder_file(&path).with_context(|| format!("reorder {}", path.display()))?;
