@@ -73,7 +73,7 @@ fn collect_directory(
             entries.push(entry);
         }
 
-        entries.sort_by(|a, b| a.path().cmp(&b.path()));
+        entries.sort_by_key(|a| a.path());
 
         for entry in entries {
             let path = entry.path();
@@ -236,7 +236,7 @@ fn category(item: &Item) -> Cat {
 
 fn blank_lines_after(category: usize) -> usize {
     match category {
-        0 | 1 | 2 => 0,
+        0..=2 => 0,
         _ => 1,
     }
 }
@@ -267,11 +267,10 @@ fn contains_test(expr: &syn::Expr) -> bool {
         syn::Expr::Binary(bin) => contains_test(&bin.left) || contains_test(&bin.right),
         syn::Expr::Group(group) => contains_test(&group.expr),
         syn::Expr::Call(call) => {
-            if let syn::Expr::Path(path) = &*call.func {
-                if path.path.is_ident("any") || path.path.is_ident("all") {
+            if let syn::Expr::Path(path) = &*call.func
+                && (path.path.is_ident("any") || path.path.is_ident("all")) {
                     return call.args.iter().any(contains_test);
                 }
-            }
             false
         }
         _ => false,
@@ -482,13 +481,11 @@ fn find_references(names: &[String], src: &str) -> HashMap<String, Vec<String>> 
 
             if names.iter().any(|n| word == *n) {
                 for (name, range) in &name_to_range {
-                    if start >= range.0 && start <= range.1 && word != name {
-                        if let Some(v) = refs.get_mut(name) {
-                            if !v.contains(&word.to_string()) {
+                    if start >= range.0 && start <= range.1 && word != name
+                        && let Some(v) = refs.get_mut(name)
+                            && !v.contains(&word.to_string()) {
                                 v.push(word.to_string());
                             }
-                        }
-                    }
                 }
             }
             continue;
