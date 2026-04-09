@@ -24,7 +24,7 @@ fn run_reorder(path: &Path) -> String {
 }
 
 fn test_dir() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/inputs");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/regression");
     fs::create_dir_all(&dir).expect("failed to create test dir");
     dir
 }
@@ -54,12 +54,12 @@ pub type FindingId = Uuid;
         "\
 use uuid::Uuid;
 
-pub type RunId = Uuid;
 pub type ArtifactId = Uuid;
-pub type TransitionId = &'static str;
-pub type ValidatorId = &'static str;
 pub type ExecutorId = &'static str;
 pub type FindingId = Uuid;
+pub type RunId = Uuid;
+pub type TransitionId = &'static str;
+pub type ValidatorId = &'static str;
 "
     );
 }
@@ -128,5 +128,34 @@ pub struct Foo {
     assert!(
         !result.ends_with("\n\n\n"),
         "should not have extra blank line after last item"
+    );
+}
+
+#[test]
+fn test_import_ordering() {
+    let path = test_dir().join("imports.rs");
+    fs::write(
+        &path,
+        "\
+use uuid::Uuid;
+use std::fs::File;
+use crate::module::Blah;
+use serde::Deserialize;
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    assert_eq!(
+        result,
+        "\
+use std::fs::File;
+
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::module::Blah;
+"
     );
 }

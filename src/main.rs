@@ -131,7 +131,7 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     let sorted_struct_enums = sort_by_usage(struct_enum_items, &src, &line_starts);
 
-    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 8];
+    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 10];
     for item in other_items.into_iter() {
         let cat = category(&item);
         let snippet = item_snippet(&item, &src, &line_starts);
@@ -156,10 +156,12 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     let mut wrote_any = !out.is_empty();
 
-    for (idx, bucket) in buckets.into_iter().enumerate() {
+    for (idx, mut bucket) in buckets.into_iter().enumerate() {
         if bucket.is_empty() {
             continue;
         }
+
+        bucket.sort();
 
         if wrote_any && idx != 0 {
             while !out.ends_with("\n\n") {
@@ -219,24 +221,58 @@ fn header_to_string(attrs: &[Attribute], src: &str, line_starts: &[usize]) -> St
 
 fn category(item: &Item) -> Cat {
     if is_test_module(item) {
-        return 7;
+        return 9;
     }
 
     match item {
-        Item::Use(_) | Item::ExternCrate(_) => 0,
-        Item::Type(_) => 1,
-        Item::Const(_) | Item::Static(_) => 2,
-        Item::Trait(_) | Item::TraitAlias(_) => 3,
-        Item::Struct(_) | Item::Enum(_) | Item::Union(_) | Item::Mod(_) => 4,
-        Item::Impl(_) => 5,
-        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 6,
-        _ => 6,
+        Item::Use(use_item) => use_category(use_item),
+        Item::ExternCrate(_) => 3,
+        Item::Type(_) => 4,
+        Item::Const(_) | Item::Static(_) => 5,
+        Item::Trait(_) | Item::TraitAlias(_) => 6,
+        Item::Struct(_) | Item::Enum(_) | Item::Union(_) | Item::Mod(_) => 7,
+        Item::Impl(_) => 8,
+        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 9,
+        _ => 9,
     }
+}
+
+fn use_category(use_item: &syn::ItemUse) -> Cat {
+    fn get_first_ident(tree: &syn::UseTree) -> Option<&syn::Ident> {
+        match tree {
+            syn::UseTree::Path(tree) => Some(&tree.ident),
+            syn::UseTree::Group(tree) => tree.items.first().and_then(|t| get_first_ident(t)),
+            syn::UseTree::Name(tree) => Some(&tree.ident),
+            syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => None,
+        }
+    }
+
+    let ident = match get_first_ident(&use_item.tree) {
+        Some(id) => id,
+        _ => return 1,
+    };
+    let ident_str = ident.to_string();
+    if ident_str == "crate" || ident_str == "self" {
+        return 2;
+    }
+    if is_std_crate(&ident_str) {
+        return 0;
+    }
+    1
+}
+
+fn is_std_crate(name: &str) -> bool {
+    name == "std"
+        || name == "core"
+        || name == "alloc"
+        || name.starts_with("std::")
+        || name.starts_with("core::")
+        || name.starts_with("alloc::")
 }
 
 fn blank_lines_after(category: usize) -> usize {
     match category {
-        0..=2 => 0,
+        0..=4 => 0,
         _ => 1,
     }
 }
@@ -268,9 +304,10 @@ fn contains_test(expr: &syn::Expr) -> bool {
         syn::Expr::Group(group) => contains_test(&group.expr),
         syn::Expr::Call(call) => {
             if let syn::Expr::Path(path) = &*call.func
-                && (path.path.is_ident("any") || path.path.is_ident("all")) {
-                    return call.args.iter().any(contains_test);
-                }
+                && (path.path.is_ident("any") || path.path.is_ident("all"))
+            {
+                return call.args.iter().any(contains_test);
+            }
             false
         }
         _ => false,
@@ -481,11 +518,14 @@ fn find_references(names: &[String], src: &str) -> HashMap<String, Vec<String>> 
 
             if names.iter().any(|n| word == *n) {
                 for (name, range) in &name_to_range {
-                    if start >= range.0 && start <= range.1 && word != name
+                    if start >= range.0
+                        && start <= range.1
+                        && word != name
                         && let Some(v) = refs.get_mut(name)
-                            && !v.contains(&word.to_string()) {
-                                v.push(word.to_string());
-                            }
+                        && !v.contains(&word.to_string())
+                    {
+                        v.push(word.to_string());
+                    }
                 }
             }
             continue;
@@ -561,11 +601,13 @@ mod tests {
         assert_eq!(blank_lines_after(0), 0);
         assert_eq!(blank_lines_after(1), 0);
         assert_eq!(blank_lines_after(2), 0);
-        assert_eq!(blank_lines_after(3), 1);
-        assert_eq!(blank_lines_after(4), 1);
+        assert_eq!(blank_lines_after(3), 0);
+        assert_eq!(blank_lines_after(4), 0);
         assert_eq!(blank_lines_after(5), 1);
         assert_eq!(blank_lines_after(6), 1);
         assert_eq!(blank_lines_after(7), 1);
+        assert_eq!(blank_lines_after(8), 1);
+        assert_eq!(blank_lines_after(9), 1);
     }
 
     #[test]
