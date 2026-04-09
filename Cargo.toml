@@ -3,11 +3,14 @@ name = "reorder"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-anyhow = "1"
-proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "2", features = ["full"] }
+[package.metadata.cargo-shear]
+ignored-paths = ["tests/inputs/*.rs"]
 
 [[test]]
 name = "reorder_tests"
 path = "tests/main.rs"
+
+[dependencies]
+anyhow = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full"] }
