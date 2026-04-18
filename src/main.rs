@@ -1,8 +1,9 @@
-use anyhow::{Context, Result, bail};
-use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use clap::Parser;
 use syn::spanned::Spanned;
 use syn::{Attribute, File, Item};
 
@@ -10,50 +11,37 @@ type Cat = usize;
 
 #[derive(Parser)]
 #[command(name = "refmt")]
+#[command(bin_name = "cargo refmt")]
 #[command(version, about = "Sort items consistently in Rust source files")]
 struct Args {
     #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-
-    let files = collect_input_files(args.paths)?;
-
-    for path in files {
-        reorder_file(&path).with_context(|| format!("refmt {}", path.display()))?;
+fn blank_lines_after(category: usize) -> usize {
+    match category {
+        0..=6 => 0,
+        _ => 1,
     }
-
-    Ok(())
 }
 
-fn collect_input_files(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut seen = HashSet::new();
-
-    for path in paths {
-        collect_path(&path, &mut files, &mut seen)?;
+fn category(item: &Item) -> Cat {
+    if is_test_module(item) {
+        return 11;
     }
 
-    if files.is_empty() {
-        bail!("no Rust files found");
+    match item {
+        Item::Use(use_item) => use_category(use_item),
+        Item::Mod(_) => 3,
+        Item::ExternCrate(_) => 4,
+        Item::Type(_) => 5,
+        Item::Const(_) | Item::Static(_) => 6,
+        Item::Trait(_) | Item::TraitAlias(_) => 7,
+        Item::Struct(_) | Item::Enum(_) | Item::Union(_) => 8,
+        Item::Impl(_) => 9,
+        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 10,
+        _ => 10,
     }
-
-    Ok(files)
-}
-
-fn collect_path(path: &Path, files: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) -> Result<()> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("inspect metadata for {}", path.display()))?;
-
-    if metadata.is_dir() {
-        collect_directory(path, files, seen)?;
-    } else if metadata.is_file() {
-        push_file(path.to_path_buf(), files, seen);
-    }
-
-    Ok(())
 }
 
 fn collect_directory(
@@ -102,9 +90,199 @@ fn collect_directory(
     Ok(())
 }
 
-fn push_file(path: PathBuf, files: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
-    if seen.insert(path.clone()) {
-        files.push(path);
+fn collect_input_files(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in paths {
+        collect_path(&path, &mut files, &mut seen)?;
+    }
+
+    if files.is_empty() {
+        bail!("no Rust files found");
+    }
+
+    Ok(files)
+}
+
+fn collect_path(path: &Path, files: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("inspect metadata for {}", path.display()))?;
+
+    if metadata.is_dir() {
+        collect_directory(path, files, seen)?;
+    } else if metadata.is_file() {
+        push_file(path.to_path_buf(), files, seen);
+    }
+
+    Ok(())
+}
+
+fn contains_test(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path.path.is_ident("test"),
+        syn::Expr::Tuple(tuple) => tuple.elems.iter().any(contains_test),
+        syn::Expr::Binary(bin) => contains_test(&bin.left) || contains_test(&bin.right),
+        syn::Expr::Group(group) => contains_test(&group.expr),
+        syn::Expr::Call(call) => {
+            if let syn::Expr::Path(path) = &*call.func
+                && (path.path.is_ident("any") || path.path.is_ident("all"))
+            {
+                return call.args.iter().any(contains_test);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn find_item_range(name: &str, src: &str) -> Option<(usize, usize)> {
+    let pattern = format!("{} {{", name);
+    if let Some(start) = src.find(&pattern) {
+        let mut brace_count = 0;
+        let mut in_body = false;
+        for (i, c) in src[start..].char_indices() {
+            if c == '{' {
+                brace_count += 1;
+                in_body = true;
+            } else if c == '}' {
+                brace_count -= 1;
+                if in_body && brace_count == 0 {
+                    return Some((start, start + i + 1));
+                }
+            }
+        }
+    }
+
+    if let Some(start) = src.find(&format!("{};", name)) {
+        return Some((start, start + name.len() + 1));
+    }
+
+    None
+}
+
+fn find_references(names: &[String], src: &str) -> HashMap<String, Vec<String>> {
+    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+
+    for name in names {
+        refs.insert(name.clone(), Vec::new());
+    }
+
+    let name_to_range: HashMap<String, (usize, usize)> = names
+        .iter()
+        .filter_map(|n| {
+            let range = find_item_range(n, src)?;
+            Some((n.clone(), range))
+        })
+        .collect();
+
+    let mut i = 0;
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            } else if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &src[start..i];
+
+            if names.iter().any(|n| word == *n) {
+                for (name, range) in &name_to_range {
+                    if start >= range.0
+                        && start <= range.1
+                        && word != name
+                        && let Some(v) = refs.get_mut(name)
+                        && !v.contains(&word.to_string())
+                    {
+                        v.push(word.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    refs
+}
+
+fn fn_item_name(item: &Item) -> String {
+    match item {
+        Item::Fn(fn_item) => fn_item.sig.ident.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn fn_visibility_rank(item: &Item) -> u8 {
+    match item {
+        Item::Fn(fn_item) => match &fn_item.vis {
+            syn::Visibility::Public(_) => 0,
+            syn::Visibility::Restricted(_) => 1,
+            syn::Visibility::Inherited => 2,
+        },
+        _ => 0,
+    }
+}
+
+fn has_cfg_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        match attr.parse_args::<syn::Expr>() {
+            Ok(expr) => contains_test(&expr),
+            Err(_) => false,
+        }
+    })
+}
+
+fn header_to_string(attrs: &[Attribute], src: &str, line_starts: &[usize]) -> String {
+    if attrs.is_empty() {
+        return String::new();
+    }
+
+    let mut start = usize::MAX;
+    let mut end = 0usize;
+
+    for attr in attrs {
+        let range = span_range(attr.span(), line_starts, src.len());
+        start = start.min(range.start);
+        end = end.max(range.end);
+    }
+
+    src[start..end].to_string()
+}
+
+fn impl_type_name(impl_snippet: &str) -> String {
+    let impl_keyword = "impl";
+    if let Some(start) = impl_snippet.strip_prefix(impl_keyword) {
+        let trimmed = start.trim();
+        if let Some(pos) = trimmed.find('<') {
+            trimmed[..pos].trim().to_string()
+        } else if let Some(for_pos) = trimmed.find(" for ") {
+            let after_for = trimmed[for_pos + 5..].trim();
+            after_for.split_whitespace().next().unwrap_or(after_for).to_string()
+        } else {
+            trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
+        }
+    } else {
+        String::new()
     }
 }
 
@@ -112,6 +290,111 @@ fn is_rust_file(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) => ext.eq_ignore_ascii_case("rs"),
         None => false,
+    }
+}
+
+fn is_std_crate(name: &str) -> bool {
+    name == "std"
+        || name == "core"
+        || name == "alloc"
+        || name.starts_with("std::")
+        || name.starts_with("core::")
+        || name.starts_with("alloc::")
+}
+
+fn is_test_module(item: &Item) -> bool {
+    match item {
+        Item::Mod(module) => has_cfg_test(&module.attrs),
+        _ => false,
+    }
+}
+
+fn item_attributes(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        Item::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+fn item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Struct(s) => Some(s.ident.to_string()),
+        Item::Enum(e) => Some(e.ident.to_string()),
+        Item::Union(u) => Some(u.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn item_snippet(item: &Item, src: &str, line_starts: &[usize]) -> String {
+    let mut range = span_range(item.span(), line_starts, src.len());
+
+    for attr in item_attributes(item) {
+        let attr_range = span_range(attr.span(), line_starts, src.len());
+        if attr_range.start < range.start {
+            range.start = attr_range.start;
+        }
+    }
+
+    range.start = range.start.min(range.end);
+
+    src[range].trim_end().to_string()
+}
+
+fn line_start_offsets(src: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(src.len() / 32 + 2);
+    starts.push(0);
+    for (idx, ch) in src.char_indices() {
+        if ch == '\n' {
+            let next = idx + ch.len_utf8();
+            starts.push(next);
+        }
+    }
+    if *starts.last().unwrap_or(&0) != src.len() {
+        starts.push(src.len());
+    }
+    starts
+}
+
+fn main() -> Result<()> {
+    let mut raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() > 1 && raw_args[1] == "refmt" {
+        raw_args.remove(1);
+    }
+    let args = Args::parse_from(raw_args);
+
+    let paths = if args.paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        args.paths
+    };
+
+    let files = collect_input_files(paths)?;
+
+    for path in files {
+        reorder_file(&path).with_context(|| format!("refmt {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn push_file(path: PathBuf, files: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    if seen.insert(path.clone()) {
+        files.push(path);
     }
 }
 
@@ -238,223 +521,6 @@ fn reorder_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn header_to_string(attrs: &[Attribute], src: &str, line_starts: &[usize]) -> String {
-    if attrs.is_empty() {
-        return String::new();
-    }
-
-    let mut start = usize::MAX;
-    let mut end = 0usize;
-
-    for attr in attrs {
-        let range = span_range(attr.span(), line_starts, src.len());
-        start = start.min(range.start);
-        end = end.max(range.end);
-    }
-
-    src[start..end].to_string()
-}
-
-fn category(item: &Item) -> Cat {
-    if is_test_module(item) {
-        return 11;
-    }
-
-    match item {
-        Item::Use(use_item) => use_category(use_item),
-        Item::Mod(_) => 3,
-        Item::ExternCrate(_) => 4,
-        Item::Type(_) => 5,
-        Item::Const(_) | Item::Static(_) => 6,
-        Item::Trait(_) | Item::TraitAlias(_) => 7,
-        Item::Struct(_) | Item::Enum(_) | Item::Union(_) => 8,
-        Item::Impl(_) => 9,
-        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 10,
-        _ => 10,
-    }
-}
-
-fn use_category(use_item: &syn::ItemUse) -> Cat {
-    fn get_first_ident(tree: &syn::UseTree) -> Option<&syn::Ident> {
-        match tree {
-            syn::UseTree::Path(tree) => Some(&tree.ident),
-            syn::UseTree::Group(tree) => tree.items.first().and_then(|t| get_first_ident(t)),
-            syn::UseTree::Name(tree) => Some(&tree.ident),
-            syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => None,
-        }
-    }
-
-    let ident = match get_first_ident(&use_item.tree) {
-        Some(id) => id,
-        _ => return 1,
-    };
-    let ident_str = ident.to_string();
-    if ident_str == "crate" || ident_str == "self" {
-        return 2;
-    }
-    if is_std_crate(&ident_str) {
-        return 0;
-    }
-    1
-}
-
-fn is_std_crate(name: &str) -> bool {
-    name == "std"
-        || name == "core"
-        || name == "alloc"
-        || name.starts_with("std::")
-        || name.starts_with("core::")
-        || name.starts_with("alloc::")
-}
-
-fn blank_lines_after(category: usize) -> usize {
-    match category {
-        0..=6 => 0,
-        _ => 1,
-    }
-}
-
-fn is_test_module(item: &Item) -> bool {
-    match item {
-        Item::Mod(module) => has_cfg_test(&module.attrs),
-        _ => false,
-    }
-}
-
-fn fn_visibility_rank(item: &Item) -> u8 {
-    match item {
-        Item::Fn(fn_item) => match &fn_item.vis {
-            syn::Visibility::Public(_) => 0,
-            syn::Visibility::Restricted(_) => 1,
-            syn::Visibility::Inherited => 2,
-        },
-        _ => 0,
-    }
-}
-
-fn fn_item_name(item: &Item) -> String {
-    match item {
-        Item::Fn(fn_item) => fn_item.sig.ident.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn has_cfg_test(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if !attr.path().is_ident("cfg") {
-            return false;
-        }
-        match attr.parse_args::<syn::Expr>() {
-            Ok(expr) => contains_test(&expr),
-            Err(_) => false,
-        }
-    })
-}
-
-fn contains_test(expr: &syn::Expr) -> bool {
-    match expr {
-        syn::Expr::Path(path) => path.path.is_ident("test"),
-        syn::Expr::Tuple(tuple) => tuple.elems.iter().any(contains_test),
-        syn::Expr::Binary(bin) => contains_test(&bin.left) || contains_test(&bin.right),
-        syn::Expr::Group(group) => contains_test(&group.expr),
-        syn::Expr::Call(call) => {
-            if let syn::Expr::Path(path) = &*call.func
-                && (path.path.is_ident("any") || path.path.is_ident("all"))
-            {
-                return call.args.iter().any(contains_test);
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-fn line_start_offsets(src: &str) -> Vec<usize> {
-    let mut starts = Vec::with_capacity(src.len() / 32 + 2);
-    starts.push(0);
-    for (idx, ch) in src.char_indices() {
-        if ch == '\n' {
-            let next = idx + ch.len_utf8();
-            starts.push(next);
-        }
-    }
-    if *starts.last().unwrap_or(&0) != src.len() {
-        starts.push(src.len());
-    }
-    starts
-}
-
-fn span_range(
-    span: proc_macro2::Span,
-    line_starts: &[usize],
-    src_len: usize,
-) -> std::ops::Range<usize> {
-    let start = span.start();
-    let end = span.end();
-
-    let start_line_index = start.line.saturating_sub(1);
-    let end_line_index = end.line.saturating_sub(1);
-
-    let start_line_base = line_starts
-        .get(start_line_index)
-        .copied()
-        .unwrap_or(src_len);
-    let end_line_base = line_starts.get(end_line_index).copied().unwrap_or(src_len);
-
-    let mut start_idx = start_line_base.saturating_add(start.column);
-    let mut end_idx = end_line_base.saturating_add(end.column);
-
-    if start_idx > src_len {
-        start_idx = src_len;
-    }
-    if end_idx > src_len {
-        end_idx = src_len;
-    }
-
-    if start_idx > end_idx {
-        start_idx = end_idx;
-    }
-
-    start_idx..end_idx
-}
-
-fn item_snippet(item: &Item, src: &str, line_starts: &[usize]) -> String {
-    let mut range = span_range(item.span(), line_starts, src.len());
-
-    for attr in item_attributes(item) {
-        let attr_range = span_range(attr.span(), line_starts, src.len());
-        if attr_range.start < range.start {
-            range.start = attr_range.start;
-        }
-    }
-
-    range.start = range.start.min(range.end);
-
-    src[range].trim_end().to_string()
-}
-
-fn item_attributes(item: &Item) -> &[Attribute] {
-    match item {
-        Item::Const(item) => &item.attrs,
-        Item::Enum(item) => &item.attrs,
-        Item::ExternCrate(item) => &item.attrs,
-        Item::Fn(item) => &item.attrs,
-        Item::ForeignMod(item) => &item.attrs,
-        Item::Impl(item) => &item.attrs,
-        Item::Macro(item) => &item.attrs,
-        Item::Mod(item) => &item.attrs,
-        Item::Static(item) => &item.attrs,
-        Item::Struct(item) => &item.attrs,
-        Item::Trait(item) => &item.attrs,
-        Item::TraitAlias(item) => &item.attrs,
-        Item::Type(item) => &item.attrs,
-        Item::Union(item) => &item.attrs,
-        Item::Use(item) => &item.attrs,
-        Item::Verbatim(_) => &[],
-        _ => &[],
-    }
-}
-
 fn sort_by_usage(items: Vec<Item>, src: &str, _line_starts: &[usize]) -> Vec<Item> {
     if items.is_empty() {
         return items;
@@ -495,116 +561,62 @@ fn sort_by_usage(items: Vec<Item>, src: &str, _line_starts: &[usize]) -> Vec<Ite
     sorted
 }
 
-fn item_name(item: &Item) -> Option<String> {
-    match item {
-        Item::Struct(s) => Some(s.ident.to_string()),
-        Item::Enum(e) => Some(e.ident.to_string()),
-        Item::Union(u) => Some(u.ident.to_string()),
-        _ => None,
+fn span_range(
+    span: proc_macro2::Span,
+    line_starts: &[usize],
+    src_len: usize,
+) -> std::ops::Range<usize> {
+    let start = span.start();
+    let end = span.end();
+
+    let start_line_index = start.line.saturating_sub(1);
+    let end_line_index = end.line.saturating_sub(1);
+
+    let start_line_base = line_starts
+        .get(start_line_index)
+        .copied()
+        .unwrap_or(src_len);
+    let end_line_base = line_starts.get(end_line_index).copied().unwrap_or(src_len);
+
+    let mut start_idx = start_line_base.saturating_add(start.column);
+    let mut end_idx = end_line_base.saturating_add(end.column);
+
+    if start_idx > src_len {
+        start_idx = src_len;
     }
+    if end_idx > src_len {
+        end_idx = src_len;
+    }
+
+    if start_idx > end_idx {
+        start_idx = end_idx;
+    }
+
+    start_idx..end_idx
 }
 
-fn impl_type_name(impl_snippet: &str) -> String {
-    let impl_keyword = "impl";
-    if let Some(start) = impl_snippet.strip_prefix(impl_keyword) {
-        let trimmed = start.trim();
-        if let Some(pos) = trimmed.find('<') {
-            trimmed[..pos].trim().to_string()
-        } else if let Some(for_pos) = trimmed.find(" for ") {
-            let after_for = trimmed[for_pos + 5..].trim();
-            after_for.split_whitespace().next().unwrap_or(after_for).to_string()
-        } else {
-            trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
-        }
-    } else {
-        String::new()
-    }
-}
-
-fn find_references(names: &[String], src: &str) -> HashMap<String, Vec<String>> {
-    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
-
-    for name in names {
-        refs.insert(name.clone(), Vec::new());
-    }
-
-    let name_to_range: HashMap<String, (usize, usize)> = names
-        .iter()
-        .filter_map(|n| {
-            let range = find_item_range(n, src)?;
-            Some((n.clone(), range))
-        })
-        .collect();
-
-    let mut i = 0;
-    let bytes = src.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'/' {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            } else if bytes[i + 1] == b'*' {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 2;
-                continue;
-            }
-        }
-
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            let word = &src[start..i];
-
-            if names.iter().any(|n| word == *n) {
-                for (name, range) in &name_to_range {
-                    if start >= range.0
-                        && start <= range.1
-                        && word != name
-                        && let Some(v) = refs.get_mut(name)
-                        && !v.contains(&word.to_string())
-                    {
-                        v.push(word.to_string());
-                    }
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-
-    refs
-}
-
-fn find_item_range(name: &str, src: &str) -> Option<(usize, usize)> {
-    let pattern = format!("{} {{", name);
-    if let Some(start) = src.find(&pattern) {
-        let mut brace_count = 0;
-        let mut in_body = false;
-        for (i, c) in src[start..].char_indices() {
-            if c == '{' {
-                brace_count += 1;
-                in_body = true;
-            } else if c == '}' {
-                brace_count -= 1;
-                if in_body && brace_count == 0 {
-                    return Some((start, start + i + 1));
-                }
-            }
+fn use_category(use_item: &syn::ItemUse) -> Cat {
+    fn get_first_ident(tree: &syn::UseTree) -> Option<&syn::Ident> {
+        match tree {
+            syn::UseTree::Path(tree) => Some(&tree.ident),
+            syn::UseTree::Group(tree) => tree.items.first().and_then(|t| get_first_ident(t)),
+            syn::UseTree::Name(tree) => Some(&tree.ident),
+            syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => None,
         }
     }
 
-    if let Some(start) = src.find(&format!("{};", name)) {
-        return Some((start, start + name.len() + 1));
+    let ident = match get_first_ident(&use_item.tree) {
+        Some(id) => id,
+        _ => return 1,
+    };
+    let ident_str = ident.to_string();
+    if ident_str == "crate" || ident_str == "self" {
+        return 2;
     }
-
-    None
+    if is_std_crate(&ident_str) {
+        return 0;
+    }
+    1
 }
 
 #[cfg(test)]

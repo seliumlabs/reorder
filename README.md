@@ -1,6 +1,6 @@
-# refmt
+# cargo-refmt
 
-`refmt` is a small CLI tool that rewrites Rust source files so their top-level items appear in a consistent order. The ordering groups imports, type aliases, constants, modules, implementations, functions, and test modules into predictable sections, preserving existing shebangs and crate-level attributes.
+`cargo-refmt` is a small CLI tool that rewrites Rust source files so their top-level items appear in a consistent order. The ordering groups imports, type aliases, constants, modules, implementations, functions, and test modules into predictable sections, preserving existing shebangs and crate-level attributes.
 
 Note that this is highly opinionated and currently not configurable. I'm assuming no one else will want to use this tool, but if you do, raise a ticket and I'll publish it on `crates.io`.
 
@@ -9,7 +9,8 @@ Note that this is highly opinionated and currently not configurable. I'm assumin
 Build and run the binary from the workspace root:
 
 ```bash
-cargo run -- <paths>
+cargo install --path .
+cargo refmt[ <paths>]
 ```
 
 The tool accepts any mix of file and directory paths:
