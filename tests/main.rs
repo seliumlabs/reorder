@@ -191,6 +191,169 @@ pub mod run;
 }
 
 #[test]
+fn test_mod_after_use_not_at_bottom() {
+    let path = test_dir().join("mod_after_use.rs");
+    fs::write(
+        &path,
+        "\
+mod context;
+mod ids;
+
+use std::fs;
+use std::path::Path;
+
+pub fn run() {}
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    let use_pos = result.find("use std::fs").expect("use statement not found");
+    let mod_pos = result.find("mod context").expect("mod not found");
+    let fn_pos = result.find("pub fn run").expect("fn not found");
+    assert!(
+        use_pos < mod_pos,
+        "use statements should come before mod: got use at {use_pos}, mod at {mod_pos}"
+    );
+    assert!(
+        mod_pos < fn_pos,
+        "mod should come before fn: got mod at {mod_pos}, fn at {fn_pos}"
+    );
+}
+
+#[test]
+fn test_cfg_test_module_at_bottom() {
+    let path = test_dir().join("cfg_test_module.rs");
+    fs::write(
+        &path,
+        "\
+#[cfg(test)]
+mod tests {
+    use super::*;
+}
+
+use std::fs;
+
+pub fn run() {}
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    let use_pos = result.find("use std::fs").expect("use not found");
+    let fn_pos = result.find("pub fn run").expect("fn not found");
+    let test_pos = result.find("#[cfg(test)]").expect("#[cfg(test)] not found");
+    assert!(
+        test_pos > use_pos,
+        "#[cfg(test)] mod should be after use at {use_pos}, got test at {test_pos}"
+    );
+    assert!(
+        test_pos > fn_pos,
+        "#[cfg(test)] mod should be after fn at {fn_pos}, got test at {test_pos}"
+    );
+}
+
+#[test]
+fn test_bare_mod_tests_not_at_bottom() {
+    let path = test_dir().join("bare_mod_tests.rs");
+    fs::write(
+        &path,
+        "\
+mod tests;
+
+use std::fs;
+
+pub fn run() {}
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    let use_pos = result.find("use std::fs").expect("use not found");
+    let mod_pos = result.find("mod tests").expect("mod tests not found");
+    let fn_pos = result.find("pub fn run").expect("fn not found");
+    assert!(
+        use_pos < mod_pos,
+        "use should come before mod tests: got use at {use_pos}, mod at {mod_pos}"
+    );
+    assert!(
+        mod_pos < fn_pos,
+        "bare mod tests should come before fn: got mod at {mod_pos}, fn at {fn_pos}"
+    );
+}
+
+#[test]
+fn test_fn_visibility_order() {
+    let path = test_dir().join("fn_visibility.rs");
+    fs::write(
+        &path,
+        "\
+fn private_fn() {}
+
+pub(crate) fn crate_fn() {}
+
+pub fn public_fn() {}
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    let pub_pos = result.find("pub fn public_fn").expect("pub fn not found");
+    let crate_pos = result
+        .find("pub(crate) fn crate_fn")
+        .expect("pub(crate) fn not found");
+    let priv_pos = result.find("fn private_fn").expect("private fn not found");
+    assert!(
+        pub_pos < crate_pos,
+        "pub fn should come before pub(crate) fn: got pub at {pub_pos}, pub(crate) at {crate_pos}"
+    );
+    assert!(
+        crate_pos < priv_pos,
+        "pub(crate) fn should come before private fn: got pub(crate) at {crate_pos}, private at {priv_pos}"
+    );
+}
+
+#[test]
+fn test_constants_no_blank_lines() {
+    let path = test_dir().join("constants.rs");
+    fs::write(
+        &path,
+        "\
+const DEFAULT_MODEL: &str = \"gpt-5.4\";
+
+const EXECUTOR_TURNS: usize = 12;
+
+const IMPLEMENTATION_RETRY_LIMIT: usize = 3;
+
+const MAX_FINAL_REVIEW_PASSES: usize = 3;
+
+const WORKFLOW_MAX_CONCURRENCY: usize = 4;
+
+const WORKTREE_DIR: &str = \".mmat-worktrees\";
+",
+    )
+    .expect("failed to write test file");
+
+    let result = run_reorder(&path);
+
+    assert_eq!(
+        result,
+        "\
+const DEFAULT_MODEL: &str = \"gpt-5.4\";
+const EXECUTOR_TURNS: usize = 12;
+const IMPLEMENTATION_RETRY_LIMIT: usize = 3;
+const MAX_FINAL_REVIEW_PASSES: usize = 3;
+const WORKFLOW_MAX_CONCURRENCY: usize = 4;
+const WORKTREE_DIR: &str = \".mmat-worktrees\";
+"
+    );
+}
+
+#[test]
 fn test_impl_order_by_type_order() {
     let path = test_dir().join("impl_order.rs");
     fs::write(

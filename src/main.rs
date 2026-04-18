@@ -9,8 +9,8 @@ use syn::{Attribute, File, Item};
 type Cat = usize;
 
 #[derive(Parser)]
-#[command(name = "reorder")]
-#[command(version, about = "Reorder items in Rust source files")]
+#[command(name = "refmt")]
+#[command(version, about = "Sort items consistently in Rust source files")]
 struct Args {
     #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     let files = collect_input_files(args.paths)?;
 
     for path in files {
-        reorder_file(&path).with_context(|| format!("reorder {}", path.display()))?;
+        reorder_file(&path).with_context(|| format!("refmt {}", path.display()))?;
     }
 
     Ok(())
@@ -124,19 +124,30 @@ fn reorder_file(path: &Path) -> Result<()> {
     let shebang = file.shebang.take();
     let crate_attrs = std::mem::take(&mut file.attrs);
 
-    let (struct_enum_items, other_items): (Vec<_>, Vec<_>) = file
+    let (struct_enum_items, rest_items): (Vec<_>, Vec<_>) = file
         .items
         .into_iter()
         .partition(|item| matches!(item, Item::Struct(_) | Item::Enum(_) | Item::Union(_)));
 
+    let (fn_items, other_items): (Vec<_>, Vec<_>) = rest_items
+        .into_iter()
+        .partition(|item| matches!(item, Item::Fn(_)));
+
     let sorted_struct_enums = sort_by_usage(struct_enum_items, &src, &line_starts);
+
+    let mut sorted_fn_items = fn_items;
+    sorted_fn_items.sort_by(|a, b| {
+        fn_visibility_rank(a)
+            .cmp(&fn_visibility_rank(b))
+            .then_with(|| fn_item_name(a).cmp(&fn_item_name(b)))
+    });
 
     let type_order: Vec<String> = sorted_struct_enums
         .iter()
         .filter_map(|item| item_name(item))
         .collect();
 
-    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 11];
+    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); 12];
     for item in other_items.into_iter() {
         let cat = category(&item);
         let snippet = item_snippet(&item, &src, &line_starts);
@@ -145,7 +156,12 @@ fn reorder_file(path: &Path) -> Result<()> {
 
     for item in sorted_struct_enums.into_iter() {
         let snippet = item_snippet(&item, &src, &line_starts);
-        buckets[7].push(snippet);
+        buckets[8].push(snippet);
+    }
+
+    for item in sorted_fn_items.into_iter() {
+        let snippet = item_snippet(&item, &src, &line_starts);
+        buckets[10].push(snippet);
     }
 
     let mut out = String::new();
@@ -166,7 +182,7 @@ fn reorder_file(path: &Path) -> Result<()> {
             continue;
         }
 
-        if idx == 8 {
+        if idx == 9 {
             bucket.sort_by(|a, b| {
                 let name_a = impl_type_name(a);
                 let name_b = impl_type_name(b);
@@ -179,7 +195,7 @@ fn reorder_file(path: &Path) -> Result<()> {
                     (None, None) => std::cmp::Ordering::Greater,
                 }
             });
-        } else if idx != 7 {
+        } else if idx != 8 && idx != 10 {
             bucket.sort();
         }
 
@@ -241,20 +257,20 @@ fn header_to_string(attrs: &[Attribute], src: &str, line_starts: &[usize]) -> St
 
 fn category(item: &Item) -> Cat {
     if is_test_module(item) {
-        return 9;
+        return 11;
     }
 
     match item {
         Item::Use(use_item) => use_category(use_item),
-        Item::ExternCrate(_) => 3,
-        Item::Type(_) => 4,
-        Item::Const(_) | Item::Static(_) => 5,
-        Item::Trait(_) | Item::TraitAlias(_) => 6,
-        Item::Struct(_) | Item::Enum(_) | Item::Union(_) => 7,
-        Item::Mod(_) => 10,
-        Item::Impl(_) => 8,
-        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 9,
-        _ => 9,
+        Item::Mod(_) => 3,
+        Item::ExternCrate(_) => 4,
+        Item::Type(_) => 5,
+        Item::Const(_) | Item::Static(_) => 6,
+        Item::Trait(_) | Item::TraitAlias(_) => 7,
+        Item::Struct(_) | Item::Enum(_) | Item::Union(_) => 8,
+        Item::Impl(_) => 9,
+        Item::Fn(_) | Item::ForeignMod(_) | Item::Macro(_) | Item::Verbatim(_) => 10,
+        _ => 10,
     }
 }
 
@@ -293,17 +309,33 @@ fn is_std_crate(name: &str) -> bool {
 
 fn blank_lines_after(category: usize) -> usize {
     match category {
-        0..=4 => 0,
-        7 => 1,
-        10 => 0,
+        0..=6 => 0,
         _ => 1,
     }
 }
 
 fn is_test_module(item: &Item) -> bool {
     match item {
-        Item::Mod(module) => has_cfg_test(&module.attrs) || module.ident == "tests",
+        Item::Mod(module) => has_cfg_test(&module.attrs),
         _ => false,
+    }
+}
+
+fn fn_visibility_rank(item: &Item) -> u8 {
+    match item {
+        Item::Fn(fn_item) => match &fn_item.vis {
+            syn::Visibility::Public(_) => 0,
+            syn::Visibility::Restricted(_) => 1,
+            syn::Visibility::Inherited => 2,
+        },
+        _ => 0,
+    }
+}
+
+fn fn_item_name(item: &Item) -> String {
+    match item {
+        Item::Fn(fn_item) => fn_item.sig.ident.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -617,12 +649,13 @@ mod tests {
         assert_eq!(blank_lines_after(2), 0);
         assert_eq!(blank_lines_after(3), 0);
         assert_eq!(blank_lines_after(4), 0);
-        assert_eq!(blank_lines_after(5), 1);
-        assert_eq!(blank_lines_after(6), 1);
+        assert_eq!(blank_lines_after(5), 0);
+        assert_eq!(blank_lines_after(6), 0);
         assert_eq!(blank_lines_after(7), 1);
         assert_eq!(blank_lines_after(8), 1);
         assert_eq!(blank_lines_after(9), 1);
-        assert_eq!(blank_lines_after(10), 0);
+        assert_eq!(blank_lines_after(10), 1);
+        assert_eq!(blank_lines_after(11), 1);
     }
 
     #[test]

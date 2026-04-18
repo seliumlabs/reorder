@@ -1,13 +1,13 @@
 [package]
-name = "reorder"
+name = "refmt"
 version = "0.1.0"
 edition = "2024"
 
 [package.metadata.cargo-shear]
-ignored-paths = ["tests/inputs/*.rs"]
+ignored-paths = ["tests/regression/*.rs"]
 
 [[test]]
-name = "reorder_tests"
+name = "refmt_tests"
 path = "tests/main.rs"
 
 [dependencies]
